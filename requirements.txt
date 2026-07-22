@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+torch
+torchvision
+pillow
+python-multipart
+scikit-learn
+joblib
+numpy
+fpdf2
+opencv-python-headless

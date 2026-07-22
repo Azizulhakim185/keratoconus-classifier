@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Keratoconus Multi-Map Classifier</title>
+<style>
+  :root{
+    --ink:#12222e; --muted:#5a6b76; --line:#dbe4e9;
+    --teal:#0e7c86; --teal-d:#0a5b62; --hot:#e0592f; --paper:#f4f7f8; --card:#ffffff;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:"Segoe UI",system-ui,sans-serif;background:var(--paper);color:var(--ink)}
+  header{padding:34px 24px 26px;text-align:center;
+    background:linear-gradient(135deg,#0e7c86,#0a5b62);color:#fff}
+  header h1{margin:0;font-size:1.5rem;letter-spacing:.2px}
+  header p{margin:8px 0 0;opacity:.85;font-size:.9rem}
+  .wrap{max-width:920px;margin:0 auto;padding:26px 20px 60px}
+  
+  /* Patient Info Styles */
+  .patient-info{background:var(--card);border:1px solid var(--line);border-radius:14px;
+    padding:18px;margin-bottom:20px;display:grid;grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));gap:16px}
+  .patient-info label{display:block;font-size:.8rem;font-weight:700;color:var(--teal-d);margin-bottom:6px;letter-spacing:.5px}
+  .patient-info input{width:100%;padding:10px;border:1px solid var(--line);border-radius:8px;
+    font-size:.95rem;background:#fdfdfd;color:var(--ink)}
+  .patient-info input:focus{outline:none;border-color:var(--teal);box-shadow:0 0 0 3px rgba(14,124,134,0.1)}
+
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:14px}
+  .slot{background:var(--card);border:1.5px dashed var(--line);border-radius:14px;
+    padding:14px;text-align:center;transition:.15s;position:relative}
+  .slot.filled{border-style:solid;border-color:var(--teal)}
+  .slot label{display:block;font-weight:700;font-size:.8rem;color:var(--teal-d);margin-bottom:8px;letter-spacing:.5px}
+  .slot .thumb{width:100%;height:96px;border-radius:9px;object-fit:cover;background:#eef3f5;display:none}
+  .slot.filled .thumb{display:block}
+  .slot .hint{color:var(--muted);font-size:.75rem;padding:26px 0}
+  .slot.filled .hint{display:none}
+  .slot input{position:absolute;inset:0;opacity:0;cursor:pointer}
+  
+  .bar{display:flex;gap:12px;align-items:center;margin:24px 0 8px;flex-wrap:wrap}
+  button{background:var(--hot);color:#fff;border:0;padding:13px 26px;border-radius:11px;
+    font-size:1rem;font-weight:700;cursor:pointer;transition:.15s}
+  button:hover{filter:brightness(1.06)}
+  button:disabled{background:#b9c6cd;cursor:not-allowed}
+  button.secondary{background:var(--teal)}
+  button.secondary:hover{filter:brightness(1.1)}
+  .count{color:var(--muted);font-size:.85rem}
+  
+  .result{background:var(--card);border:1px solid var(--line);border-radius:16px;
+    padding:22px;margin-top:22px;display:none}
+  .result.show{display:block}
+  .verdict{font-size:1.35rem;font-weight:800}
+  .conf{color:var(--muted);font-size:.9rem;margin:2px 0 18px}
+  .prob{margin:10px 0}
+  .prob .row{display:flex;justify-content:space-between;font-size:.85rem;margin-bottom:4px}
+  .track{height:9px;background:#eef3f5;border-radius:6px;overflow:hidden}
+  .fill{height:100%;background:linear-gradient(90deg,#0e7c86,#e0592f);border-radius:6px}
+  .spinner{display:none;width:18px;height:18px;border:3px solid #fff5;border-top-color:#fff;
+    border-radius:50%;animation:spin .8s linear infinite;vertical-align:middle;margin-right:8px}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  footer{text-align:center;color:var(--muted);font-size:.78rem;padding:20px}
+</style>
+</head>
+<body>
+  <header>
+    <!-- Abstract Corneal Topography SVG -->
+    <svg width="100" height="100" viewBox="0 0 120 120" fill="none" xmlns="http://www.w3.org/2000/svg" style="margin-bottom: 12px;">
+      <defs>
+        <radialGradient id="corneaGrad" cx="50%" cy="50%" r="50%">
+          <stop offset="0%" stop-color="#e0592f" stop-opacity="0.9"/>
+          <stop offset="50%" stop-color="#ffffff" stop-opacity="0.2"/>
+          <stop offset="100%" stop-color="#0a5b62" stop-opacity="0.8"/>
+        </radialGradient>
+      </defs>
+      <circle cx="60" cy="60" r="55" stroke="#ffffff" stroke-opacity="0.3" stroke-width="2"/>
+      <circle cx="60" cy="60" r="45" stroke="#ffffff" stroke-opacity="0.4" stroke-width="2"/>
+      <circle cx="60" cy="60" r="35" stroke="#ffffff" stroke-opacity="0.5" stroke-width="2"/>
+      <circle cx="60" cy="60" r="25" stroke="#ffffff" stroke-opacity="0.6" stroke-width="2"/>
+      <circle cx="60" cy="60" r="15" fill="url(#corneaGrad)"/>
+      <path d="M60 5 C 80 20, 80 100, 60 115" stroke="#ffffff" stroke-opacity="0.4" stroke-width="2" fill="none"/>
+      <path d="M5 60 C 20 40, 100 40, 115 60" stroke="#ffffff" stroke-opacity="0.4" stroke-width="2" fill="none"/>
+    </svg>
+    <h1>Keratoconus Multi-Map Classifier</h1>
+    <p>AI-Powered Multi-Map Framework &middot; Bangladeshi Eye Images</p>
+  </header>
+
+  <div class="wrap">
+    <!-- Patient Info Inputs -->
+    <div class="patient-info">
+      <div>
+        <label for="patient_name">Patient Name</label>
+        <input type="text" id="patient_name" placeholder="e.g., John Doe">
+      </div>
+      <div>
+        <label for="patient_age">Age</label>
+        <input type="number" id="patient_age" placeholder="e.g., 28">
+      </div>
+      <div>
+        <label for="patient_vision">Vision (Acuity)</label>
+        <input type="text" id="patient_vision" placeholder="e.g., 6/6 or 20/20">
+      </div>
+    </div>
+
+    <div class="grid" id="grid"></div>
+
+    <div class="bar">
+      <button id="run" disabled>
+        <span class="spinner" id="spin"></span>
+        <span id="btn-label">Run analysis</span>
+      </button>
+      <button id="downloadBtn" class="secondary" style="display:none;" onclick="downloadReport()">
+        Download PDF Report
+      </button>
+      <span class="count" id="count">0 / 7 maps uploaded</span>
+    </div>
+
+    <div class="result" id="result">
+      <div class="verdict" id="verdict"></div>
+      <div class="conf" id="conf"></div>
+      <div id="probs"></div>
+    </div>
+  </div>
+
+  <footer>For research and portfolio demonstration &mdash; not a medical device.</footer>
+
+<script>
+  const MAPS = ["SAG_A","SAG_P","ELV_A","ELV_P","CT_A","EC_A","EC_P"];
+  const files = {};
+  const grid = document.getElementById("grid");
+  let currentRecordId = null;
+
+  MAPS.forEach(name => {
+    const slot = document.createElement("div");
+    slot.className = "slot";
+    slot.innerHTML = `
+      <label>${name}</label>
+      <img class="thumb" alt="">
+      <div class="hint">click to upload</div>
+      <input type="file" accept="image/*">`;
+    const input = slot.querySelector("input");
+    const thumb = slot.querySelector("img");
+    input.addEventListener("change", e => {
+      const f = e.target.files[0];
+      if(!f) return;
+      files[name] = f;
+      thumb.src = URL.createObjectURL(f);
+      slot.classList.add("filled");
+      refresh();
+    });
+    grid.appendChild(slot);
+  });
+
+  const runBtn = document.getElementById("run");
+  function refresh(){
+    const n = Object.keys(files).length;
+    document.getElementById("count").textContent = `${n} / 7 maps uploaded`;
+    // Enable run button only if 7 images are uploaded AND patient name/age/vision are filled
+    const infoFilled = document.getElementById("patient_name").value && 
+                       document.getElementById("patient_age").value && 
+                       document.getElementById("patient_vision").value;
+    runBtn.disabled = !(n === 7 && infoFilled);
+  }
+
+  // Add event listeners to text inputs to trigger button refresh
+  document.querySelectorAll('.patient-info input').forEach(input => {
+    input.addEventListener('input', refresh);
+  });
+
+  runBtn.addEventListener("click", async () => {
+    runBtn.disabled = true;
+    document.getElementById("spin").style.display = "inline-block";
+    document.getElementById("btn-label").textContent = "Analysing...";
+    document.getElementById("downloadBtn").style.display = "none";
+
+    const fd = new FormData();
+    // Append patient info
+    fd.append("name", document.getElementById("patient_name").value);
+    fd.append("age", document.getElementById("patient_age").value);
+    fd.append("vision", document.getElementById("patient_vision").value);
+    
+    // Append images
+    MAPS.forEach(name => fd.append(name, files[name]));
+
+    try{
+      const res = await fetch("/predict", { method:"POST", body: fd });
+      const data = await res.json();
+      
+      if (res.ok) {
+        currentRecordId = data.record_id;
+        show(data);
+        // Show download button after successful prediction
+        document.getElementById("downloadBtn").style.display = "inline-block";
+      } else {
+        alert("Error processing images. Please check the server console.");
+      }
+    }catch(err){
+      alert("Could not reach the model. Is the server running?");
+    }finally{
+      document.getElementById("spin").style.display = "none";
+      document.getElementById("btn-label").textContent = "Run analysis";
+      runBtn.disabled = false;
+    }
+  });
+
+  function downloadReport() {
+    if (currentRecordId) {
+      window.location.href = `/download_report/${currentRecordId}`;
+    }
+  }
+
+  function show(data){
+    document.getElementById("verdict").textContent = "Prediction: " + data.predicted_class;
+    const box = document.getElementById("probs");
+    const conf = document.getElementById("conf");
+    box.innerHTML = "";
+    
+    if (data.probabilities) {
+      // The backend now sends probabilities as percentages (e.g., 85.43)
+      conf.textContent = "Probability Distribution:";
+      Object.entries(data.probabilities).forEach(([cls,p]) => {
+        // p is already a percentage number (0-100)
+        const pct = p.toFixed(2);
+        box.insertAdjacentHTML("beforeend", `
+          <div class="prob">
+            <div class="row"><span>${cls}</span><span>${pct}%</span></div>
+            <div class="track"><div class="fill" style="width:${pct}%"></div></div>
+          </div>`);
+      });
+    } else {
+      conf.textContent = "";
+    }
+    document.getElementById("result").classList.add("show");
+  }
+</script>
+</body>
+</html>
