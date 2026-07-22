@@ -45,22 +45,21 @@ transform = T.Compose([
     T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
 ])
 
-def preprocess_kaggle_style(img_array: np.ndarray) -> Image.Image:
-    """Replicates the exact preprocessing from your Kaggle notebook."""
-    # 1. Convert BGR to RGB
+def preprocess_and_crop(img_array: np.ndarray):
+    """Crops the eye, resizes, and returns both color and grayscale 3-channel arrays."""
     img = cv2.cvtColor(img_array, cv2.COLOR_BGR2RGB)
     h, w = img.shape[:2]
     
-    # 2. Crop right side (remove text)
+    # Crop right side (remove text)
     crop_w = int(w * 0.82)
     img = img[:, :crop_w, :]
     
-    # 3. Crop top and bottom
+    # Crop top and bottom
     crop_h_top = int(h * 0.08)
     crop_h_bottom = int(h * 0.90)
     img = img[crop_h_top:crop_h_bottom, :, :]
     
-    # 4. Find largest contour (the eye)
+    # Find largest contour (the eye)
     gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
     _, thresh = cv2.threshold(gray, 10, 255, cv2.THRESH_BINARY)
     contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -74,69 +73,60 @@ def preprocess_kaggle_style(img_array: np.ndarray) -> Image.Image:
         x1, x2 = max(0, x - pad), min(w, x + w_box + pad)
         img = img[y1:y2, x1:x2]
         
-    # 5. Resize to 224x224
-    img = cv2.resize(img, (224, 224), interpolation=cv2.INTER_LANCZOS4)
+    img_resized = cv2.resize(img, (224, 224), interpolation=cv2.INTER_LANCZOS4)
     
-    # 6. Convert to Grayscale and back to RGB
-    img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-    img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+    # Generate Grayscale 3-channel for the ML model (to match Kaggle)
+    img_gray = cv2.cvtColor(img_resized, cv2.COLOR_RGB2GRAY)
+    img_gray_rgb = cv2.cvtColor(img_gray, cv2.COLOR_GRAY2RGB)
     
-    return Image.fromarray(img)
+    return img_resized, img_gray_rgb
 
-def extract_feature(raw_bytes: bytes, generate_map: bool = False):
-    # Read bytes as OpenCV image
-    nparr = np.frombuffer(raw_bytes, np.uint8)
-    img_array = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+def process_batch(raw_bytes_list: list):
+    """Processes all 7 images in one single fast batch."""
+    color_imgs = []
+    ml_tensors = []
     
-    # Apply Kaggle preprocessing
-    img = preprocess_kaggle_style(img_array)
+    for raw in raw_bytes_list:
+        nparr = np.frombuffer(raw, np.uint8)
+        img_array = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        color_img, ml_img = preprocess_and_crop(img_array)
+        
+        color_imgs.append(color_img)
+        ml_tensors.append(transform(Image.fromarray(ml_img)))
     
-    # PyTorch Transform
-    x = transform(img).unsqueeze(0).to(device)
+    # Stack into one batch tensor: shape (7, 3, 224, 224)
+    x_batch = torch.stack(ml_tensors).to(device)
+    x_batch.requires_grad_()
     
-    # If we don't need the map, just do fast inference and return
-    if not generate_map:
-        with torch.no_grad():
-            feat = densenet(x)
-        return feat.cpu().numpy()[0], None
-    
-    # Saliency Map generation (ONLY if generate_map=True)
-    x.requires_grad_()
+    # ONE forward pass and ONE backward pass for all 7 images!
     with torch.enable_grad():
-        feat = densenet(x)
-        feat.sum().backward()
-        saliency, _ = torch.max(x.grad.data.abs(), dim=1)
-        saliency = saliency.squeeze().cpu().numpy()
+        feats = densenet(x_batch)
+        feats.sum().backward()
+        saliency_batch, _ = torch.max(x_batch.grad.data.abs(), dim=1)
     
-    # Normalize
-    saliency = (saliency - saliency.min()) / (saliency.max() - saliency.min() + 1e-8)
+    feats_np = feats.detach().cpu().numpy()
+    saliency_np = saliency_batch.cpu().numpy()
     
-    # --- GRAD-CAM STYLE REFINEMENT ---
-    # 1. Apply Heavy Gaussian Blur to make smooth blobs (removes pixel noise)
-    saliency = cv2.GaussianBlur(saliency, (21, 21), 0)
-    
-    # Re-normalize after blur
-    saliency = (saliency - saliency.min()) / (saliency.max() - saliency.min() + 1e-8)
-    
-    # 2. Create a mask: Only keep the top 30% most important areas (threshold = 0.7)
-    mask = saliency > 0.7
-    
-    # 3. Convert to JET heatmap (Blue/Green/Red)
-    saliency_uint8 = (saliency * 255).astype(np.uint8)
-    heatmap = cv2.applyColorMap(saliency_uint8, cv2.COLORMAP_JET)
-    heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
-    
-    # 4. Blend ONLY the hotspots over the original image
-    orig_np = np.array(img)
-    blended = orig_np.copy()
-    
-    # Where the mask is True, blend 40% original + 60% heatmap
-    blended[mask] = cv2.addWeighted(orig_np, 0.4, heatmap, 0.6, 0)[mask]
-    
-    saliency_img = Image.fromarray(blended)
-    
-    return feat.detach().cpu().numpy()[0], saliency_img
-
+    heatmaps = []
+    for i in range(7):
+        sal = saliency_np[i]
+        sal = (sal - sal.min()) / (sal.max() - sal.min() + 1e-8)
+        sal = cv2.GaussianBlur(sal, (21, 21), 0)
+        sal = (sal - sal.min()) / (sal.max() - sal.min() + 1e-8)
+        
+        # Lower threshold to 0.5 to show more of the focus area
+        mask = sal > 0.5
+        sal_uint8 = (sal * 255).astype(np.uint8)
+        heatmap = cv2.applyColorMap(sal_uint8, cv2.COLORMAP_JET)
+        heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
+        
+        # Blend more of the heatmap (70% heatmap, 30% original)
+        orig_np = color_imgs[i]
+        blended = orig_np.copy()
+        blended[mask] = cv2.addWeighted(orig_np, 0.3, heatmap, 0.7, 0)[mask]
+        heatmaps.append(Image.fromarray(blended))
+        
+    return feats_np, color_imgs, heatmaps
 
 # =====================================================================
 # 4. THE API
@@ -156,33 +146,28 @@ async def predict(
     uploads = {"SAG_A": SAG_A, "SAG_P": SAG_P, "ELV_A": ELV_A,
                "ELV_P": ELV_P, "CT_A": CT_A, "EC_A": EC_A, "EC_P": EC_P}
 
-    # Create a folder for this patient to save images and PDF later
     record_id = str(uuid.uuid4())[:8]
     record_dir = os.path.join(TEMP_DIR, record_id)
     os.makedirs(record_dir, exist_ok=True)
 
-    feats = []
-    saliency_maps = {}
-    
+    # Read all bytes first
+    raw_bytes_dict = {}
     for map_name in MAP_ORDER:
-        raw = await uploads[map_name].read()
+        raw_bytes_dict[map_name] = await uploads[map_name].read()
         
-        # Save original image
-        with open(os.path.join(record_dir, f"{map_name}.png"), "wb") as f:
-            f.write(raw)
-            
-        # Only generate the heavy heatmap for CT_A to save time/memory on Render
-        gen_map = (map_name == "CT_A")
-        feat, saliency = extract_feature(raw, generate_map=gen_map)
-        feats.append(feat)
-        
-        # Save saliency map if it was generated
-        if saliency is not None:
-            sal_path = os.path.join(record_dir, f"{map_name}_saliency.png")
-            saliency.save(sal_path)
-            saliency_maps[map_name] = sal_path
+    # Run the ultra-fast batch processing
+    raw_list = [raw_bytes_dict[name] for name in MAP_ORDER]
+    feats_np, color_imgs, heatmaps = process_batch(raw_list)
+    
+    # Save images to disk for the PDF
+    for i, map_name in enumerate(MAP_ORDER):
+        # Save the cropped color image
+        Image.fromarray(color_imgs[i]).save(os.path.join(record_dir, f"{map_name}.png"))
+        # Save the heatmap
+        heatmaps[i].save(os.path.join(record_dir, f"{map_name}_saliency.png"))
 
-    x = np.concatenate(feats).reshape(1, -1)
+    # ML Prediction
+    x = np.concatenate([feats_np[i] for i in range(7)]).reshape(1, -1)
     x_scaled   = scaler.transform(x)
     x_selected = selector.transform(x_scaled)
 
@@ -197,7 +182,7 @@ async def predict(
     except AttributeError:
         pass
 
-    # Save patient info to JSON for the PDF generator
+    # Save patient info to JSON
     with open(os.path.join(record_dir, "info.json"), "w") as f:
         json.dump({
             "name": name, "age": age, "vision": vision,
@@ -251,25 +236,18 @@ def download_report(record_id: str):
         img_path = os.path.join(record_dir, f"{map_name}.png")
         sal_path = os.path.join(record_dir, f"{map_name}_saliency.png")
         
-        # If we are near the bottom of the page, add a new page
         if pdf.get_y() > 230:
             pdf.add_page()
             
         current_y = pdf.get_y()
         
-        # Column 1: Original Image Label
         pdf.set_font("Helvetica", 'B', 10)
         pdf.set_xy(10, current_y)
         pdf.cell(90, 8, text=f"{map_name} (Original)", border=0, align="L")
         
-        # Column 2: AI Focus Label
         pdf.set_xy(110, current_y)
-        if os.path.exists(sal_path):
-            pdf.cell(90, 8, text=f"{map_name} (AI Focus)", border=0, align="L")
-        else:
-            pdf.cell(90, 8, text=f"{map_name} (Feature Only)", border=0, align="L")
+        pdf.cell(90, 8, text=f"{map_name} (AI Focus)", border=0, align="L")
         
-        # Place Images strictly using x, y, w, h
         img_y = current_y + 8
         pdf.image(img_path, x=10, y=img_y, w=80, h=60)
         pdf.rect(10, img_y, 80, 60)
@@ -278,10 +256,8 @@ def download_report(record_id: str):
             pdf.image(sal_path, x=110, y=img_y, w=80, h=60)
             pdf.rect(110, img_y, 80, 60)
         else:
-            # Draw empty box for layout consistency
             pdf.rect(110, img_y, 80, 60)
         
-        # Move Y down for the next row (Image height + spacing)
         pdf.set_xy(10, img_y + 65)
 
     pdf_path = os.path.join(record_dir, "report.pdf")
