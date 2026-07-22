@@ -83,7 +83,7 @@ def preprocess_kaggle_style(img_array: np.ndarray) -> Image.Image:
     
     return Image.fromarray(img)
 
-def extract_feature(raw_bytes: bytes):
+def extract_feature(raw_bytes: bytes, generate_map: bool = False):
     # Read bytes as OpenCV image
     nparr = np.frombuffer(raw_bytes, np.uint8)
     img_array = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
@@ -94,7 +94,13 @@ def extract_feature(raw_bytes: bytes):
     # PyTorch Transform
     x = transform(img).unsqueeze(0).to(device)
     
-    # Saliency Map generation
+    # If we don't need the map, just do fast inference and return
+    if not generate_map:
+        with torch.no_grad():
+            feat = densenet(x)
+        return feat.cpu().numpy()[0], None
+    
+    # Saliency Map generation (ONLY if generate_map=True)
     x.requires_grad_()
     with torch.enable_grad():
         feat = densenet(x)
@@ -165,13 +171,16 @@ async def predict(
         with open(os.path.join(record_dir, f"{map_name}.png"), "wb") as f:
             f.write(raw)
             
-        feat, saliency = extract_feature(raw)
+        # Only generate the heavy heatmap for CT_A to save time/memory on Render
+        gen_map = (map_name == "CT_A")
+        feat, saliency = extract_feature(raw, generate_map=gen_map)
         feats.append(feat)
         
-        # Save saliency map
-        sal_path = os.path.join(record_dir, f"{map_name}_saliency.png")
-        saliency.save(sal_path)
-        saliency_maps[map_name] = sal_path
+        # Save saliency map if it was generated
+        if saliency is not None:
+            sal_path = os.path.join(record_dir, f"{map_name}_saliency.png")
+            saliency.save(sal_path)
+            saliency_maps[map_name] = sal_path
 
     x = np.concatenate(feats).reshape(1, -1)
     x_scaled   = scaler.transform(x)
@@ -255,16 +264,22 @@ def download_report(record_id: str):
         
         # Column 2: AI Focus Label
         pdf.set_xy(110, current_y)
-        pdf.cell(90, 8, text=f"{map_name} (AI Focus)", border=0, align="L")
+        if os.path.exists(sal_path):
+            pdf.cell(90, 8, text=f"{map_name} (AI Focus)", border=0, align="L")
+        else:
+            pdf.cell(90, 8, text=f"{map_name} (Feature Only)", border=0, align="L")
         
         # Place Images strictly using x, y, w, h
         img_y = current_y + 8
         pdf.image(img_path, x=10, y=img_y, w=80, h=60)
-        pdf.image(sal_path, x=110, y=img_y, w=80, h=60)
-        
-        # Draw borders around images for a clean medical report look
         pdf.rect(10, img_y, 80, 60)
-        pdf.rect(110, img_y, 80, 60)
+        
+        if os.path.exists(sal_path):
+            pdf.image(sal_path, x=110, y=img_y, w=80, h=60)
+            pdf.rect(110, img_y, 80, 60)
+        else:
+            # Draw empty box for layout consistency
+            pdf.rect(110, img_y, 80, 60)
         
         # Move Y down for the next row (Image height + spacing)
         pdf.set_xy(10, img_y + 65)
