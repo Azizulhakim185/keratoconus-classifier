@@ -144,6 +144,7 @@ async def predict(
     name: str = Form(...),
     age: str = Form(...),
     vision: str = Form(...),
+    date: str = Form(...),  # Added Date parameter
     SAG_A: UploadFile = File(...), SAG_P: UploadFile = File(...),
     ELV_A: UploadFile = File(...), ELV_P: UploadFile = File(...),
     CT_A:  UploadFile = File(...),
@@ -186,6 +187,7 @@ async def predict(
     with open(os.path.join(record_dir, "info.json"), "w") as f:
         json.dump({
             "name": name, "age": age, "vision": vision,
+            "date": date,  # Save date to JSON
             "prediction": CLASS_NAMES[pred_idx],
             "probabilities": result.get("probabilities", {})
         }, f)
@@ -213,6 +215,9 @@ def download_report(record_id: str):
     pdf.cell(200, 10, text=f"Age: {info['age']}")
     pdf.ln(8)
     pdf.cell(200, 10, text=f"Vision (Acuity): {info['vision']}")
+    pdf.ln(8)
+    # Added Date of Exam to PDF
+    pdf.cell(200, 10, text=f"Date of Exam: {info.get('date', 'N/A')}")
     pdf.ln(8)
     pdf.cell(200, 10, text=f"AI Prediction: {info['prediction']}")
     pdf.ln(10)
